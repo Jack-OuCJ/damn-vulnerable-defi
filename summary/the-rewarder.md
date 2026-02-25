@@ -90,6 +90,104 @@ function claimRewards(Claim[] memory inputClaims, IERC20[] memory inputTokens) e
 
 ## 3. 漏洞原理分析
 
+### 3.0 Bitmap 机制详解
+
+在回答"漏洞是什么"之前，需要先搞清楚"bitmap 是如何记录批次的"。
+
+#### 为什么用 bitmap 而不是 mapping(batch => bool)
+
+每个用户可能有几百个批次要领取，如果每个批次用一个独立的 `mapping` slot 记录，成本极高。
+Bitmap 把 **256 个批次的领取状态压缩进一个 `uint256`**，每个 bit 代表一个批次是否已领取，大幅节省 gas。
+
+```
+一个 uint256 = 256 个 bit = 可以记录 256 个批次的状态
+bit = 0 → 未领取
+bit = 1 → 已领取
+```
+
+---
+
+#### wordPosition 和 bitPosition 如何计算
+
+```solidity
+uint256 wordPosition = inputClaim.batchNumber / 256;
+uint256 bitPosition  = inputClaim.batchNumber % 256;
+```
+
+把所有批次按每组 256 个分段，每段对应 storage 里的一个 `uint256`（称为一个"word"）：
+
+```
+batchNumber 0   ~ 255  → wordPosition = 0，bitPosition = batchNumber
+batchNumber 256 ~ 511  → wordPosition = 1，bitPosition = batchNumber - 256
+batchNumber 512 ~ 767  → wordPosition = 2，bitPosition = batchNumber - 512
+...
+```
+
+具体例子：
+
+```
+batchNumber = 0   → wordPosition = 0, bitPosition = 0  → 第 0 个 word 的第 0 位
+batchNumber = 5   → wordPosition = 0, bitPosition = 5  → 第 0 个 word 的第 5 位
+batchNumber = 256 → wordPosition = 1, bitPosition = 0  → 第 1 个 word 的第 0 位
+batchNumber = 260 → wordPosition = 1, bitPosition = 4  → 第 1 个 word 的第 4 位
+```
+
+---
+
+#### 如何检查和标记某一位
+
+```solidity
+// 构造掩码：把第 bitPosition 位置为 1，其余全 0
+uint256 mask = 1 << bitPosition;
+
+// 检查：该位是否已经是 1（已领取）
+bool alreadyClaimed = (currentWord & mask) != 0;
+
+// 标记：把该位置为 1（记录为已领取）
+newWord = currentWord | mask;
+```
+
+用 batch 5 举例（bitPosition = 5）：
+
+```
+mask        = 0000...0010 0000  （第 5 位为 1）
+currentWord = 0000...0000 1011  （batch 0、1、3 已领取）
+
+检查：currentWord & mask
+    = 0000...0010 0000
+    & 0000...0000 1011
+    = 0000...0000 0000  → 结果为 0，说明 batch 5 未领取 ✅
+
+标记后：currentWord | mask
+    = 0000...0000 1011
+    | 0000...0010 0000
+    = 0000...0010 1011  → batch 5 的位变成 1，记录完成
+```
+
+---
+
+#### bitsSet 的作用：批量合并多个批次的标记
+
+代码里用 `bitsSet` 把同一个 token 下所有 claim 的 bit 先 OR 合并，最后一次性写入：
+
+```solidity
+bitsSet = bitsSet | (1 << bitPosition);  // 每个 batch 的 bit 做 OR
+// ...循环结束后...
+_setClaimed(token, amount, wordPosition, bitsSet);  // 一次写入
+```
+
+正常情况下（每个 batch 不同），这很高效：
+
+```
+batch 0 → bitsSet = 0b0001
+batch 1 → bitsSet = 0b0011  （OR 后两位都是 1）
+batch 3 → bitsSet = 0b1011  （OR 后第 0、1、3 位都是 1）
+→ 一次写入，记录三个批次都已领取
+```
+
+**但这里藏着漏洞**：如果重复提交同一个 batch，`1 << bitPosition` 的值完全相同，
+OR 操作不会让 bitsSet 变化——bit 幂等，但 `amount` 却一直在累加。
+
 ### 3.1 期望行为 vs 实际行为
 
 **期望行为：**

@@ -13,7 +13,7 @@
 
 - 抵押价值：`collateralAmount * oraclePrice(DVT)`
 - 借款价值：`borrowAmount * lpTokenPrice`
-- **lpTokenPrice = oraclePrice(ETH) * curvePool.get_virtual_price()`**
+- `lpTokenPrice = oraclePrice(ETH) * curvePool.get_virtual_price()`
 
 也就是说，借款资产价格完全依赖 Curve 池的 `get_virtual_price()`。
 

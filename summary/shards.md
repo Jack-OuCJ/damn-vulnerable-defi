@@ -37,7 +37,7 @@ function fill(uint256 offerId, uint256 want) external returns (bool) {
 }
 ```
 
-###漏洞2：cancel()中的计算错误（ShardsNFTMarketplace.sol#L108-L111）
+### 漏洞2：cancel()中的计算错误（ShardsNFTMarketplace.sol#L108-L111）
 
 ```solidity
 function cancel(uint256 offerId, address to) external {

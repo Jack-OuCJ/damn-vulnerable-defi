@@ -68,6 +68,7 @@ function withdraw(uint256 amount, address payable receiver) external {
 ```
 
 ### 漏洞三：Multicall 的 delegatecall 污染 calldata（Multicall.sol#L8-L14）
+>这里的主要原因是multicall用的都是同一个msg.value，delegatecall不会消耗或者分配，会被多次计算。
 
 ```solidity
 abstract contract Multicall is Context {

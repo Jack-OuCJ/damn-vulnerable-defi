@@ -58,6 +58,28 @@ Offset | 内容
 
 ## 3. 漏洞原理分析
 
+### 3.0 先理解：ABI 动态类型的 offset 字段是什么
+
+`execute(address target, bytes actionData)` 中，`bytes` 是动态类型。
+ABI 编码动态类型时，不直接把内容嵌在原位，而是在原位放一个**指针（offset）**，指向内容实际所在的位置。
+
+```
+calldata 结构（从 0x04 开始算，即去掉 execute selector 后）：
+
+位置（绝对）  字段
+──────────────────────────────────────────────────────────
+0x04          target 地址（32字节，静态类型，直接嵌入）
+0x24          ← offset 字段：值为 0x40，意思是
+              "从 0x04 开始往后数 0x40（64）字节，是 actionData 的内容"
+              即 actionData 内容从绝对位置 0x04 + 0x40 = 0x44 开始
+0x44          actionData 的长度（32字节）
+0x64          actionData 的实际内容从这里开始
+```
+
+**关键**：offset 字段的值不是固定的，ABI 规范只要求它是一个合法指针，
+没有规定必须是最小值。攻击者可以把 offset 填成更大的数，
+让内容从更靠后的位置开始，而中间的区域变成自由填充区。
+
 ### 3.1 ABI编码的灵活性
 
 **标准编码：**
@@ -91,25 +113,71 @@ execute(vault, abi.encodeCall(vault.withdraw, (recovery, token)))
 
 ### 3.2 攻击向量
 
-**关键洞察：**
-1. 汇编代码在固定偏移量`0x64`读取selector进行检查
-2. 但`functionCall(actionData)`使用真正的`actionData`（从offset开始）
-3. 通过设置非标准offset，可以让两者指向不同内容
+**`execute()` 做了两件截然不同的事：**
+
+```solidity
+function execute(address target, bytes calldata actionData) external {
+    assembly {
+        // 事① 安全检查：从"硬编码位置 0x64"读取 selector
+        let actionSel := calldataload(0x64)
+        if and(targetIsWard, eq(actionSel, 0xd9caed12)) {
+            revert("Unauthorized")   // 拦截 withdraw
+        }
+    }
+    // 事② 实际执行：用 Solidity 解码出来的 actionData 参数去调用
+    //   Solidity 会跟着 offset 字段找到真实内容
+    return target.functionCall(actionData);
+}
+```
+
+这两件事使用了**不同的数据源**：
+- 检查：固定读 calldata 的 `0x64` 字节处
+- 执行：跟随 offset 字段，读取 `actionData` 参数的真实内容
+
+**只要让这两个位置指向不同的 selector，就能同时骗过检查 + 执行任意函数。**
+
+---
+
+#### 两个视角的完整对照
+
+```
+字节位置   标准布局（offset=0x40）        攻击布局（offset=0x80）
+─────────────────────────────────────────────────────────────────────
+0x00      execute selector              execute selector
+0x04      vault 地址                   vault 地址
+0x24      offset = 0x40                offset = 0x80   ← 只改这一个字段！
+0x44      actionData 长度               全 0（自由填充区）
+          ↓                            ↓
+0x64      withdraw selector ← 内容起点  withdraw selector ← 安全检查读这里 ✅
+          recovery 地址                （假内容，仅用于骗过检查）
+          token 地址
+                                       actionData 长度     ← 真实 actionData 从这开始
+0xa4                                   sweepFunds selector ← Solidity 解码到这 💀
+0xa8                                   recovery 地址
+0xc8                                   token 地址
+
+安全检查视角：calldataload(0x64) → 读到 withdraw (0xd9caed12) → 通过 ✅
+执行视角：   actionData 从 0x04+0x80=0x84 开始 → 内容在 0xa4 → 执行 sweepFunds 💀
+```
+
+一份 calldata，两个视角，各取所需。
+
+---
 
 **攻击步骤：**
 
 1. **构造双selector payload**
    ```
-   - 在0x64放置允许的selector（withdraw: 0xd9caed12）
-   - 在真实actionData中放置禁止的selector（sweepFunds: 0x0ccc7c74）
+   - 在 0x64 放置允许的 selector（withdraw: 0xd9caed12）→ 骗过汇编检查
+   - 在真实 actionData 内容区放置禁止的 selector（sweepFunds: 0x0ccc7c74）→ 真实执行
    ```
 
 2. **精确的offset控制**
    ```solidity
-   // 设置actionData offset为0x80而不是标准的0x40
-   // 这使得：
-   // - 检查代码读到0x64位置的withdraw selector
-   // - 实际执行读到0xa4位置的sweepFunds selector
+   // 把 offset 从标准的 0x40 改为 0x80
+   // 多出来的 0x40（64字节）空间 = 32字节填充 + 32字节放假 selector
+   // 检查代码 → 读 0x64 → 看到 withdraw selector → 放行
+   // 执行代码 → 跟 offset=0x80 → 内容从 0xa4 → 执行 sweepFunds
    ```
 
 ---
